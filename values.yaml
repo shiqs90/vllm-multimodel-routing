@@ -1,0 +1,62 @@
+# Project 2 (multi-model routing) — vLLM production-stack: 2 models behind the request router.
+# Cluster: vllm-serving-eks (us-east-1), 2x g6.xlarge (L4 24GB), GPU nodes tainted
+# nvidia.com/gpu=present:NoSchedule and labeled workload=gpu.
+#
+# Deliberate choices:
+# - Both models ungated on HF -> no hf_token needed.
+# - No pvcStorage: the cluster has no EBS CSI driver; weights download on boot (~30s-1min).
+# - Engine image pinned to the Project 1 known-good tag, not :latest.
+
+servingEngineSpec:
+  runtimeClassName: "nvidia" # exists in-cluster (created by the GPU Operator)
+  # Land engine pods on the tainted GPU nodes.
+  tolerations:
+    - key: nvidia.com/gpu
+      operator: Exists
+      effect: NoSchedule
+
+  modelSpec:
+    # Model 1: small + fast — proves the router quickly.
+    - name: "qwen-1p5b"
+      repository: "vllm/vllm-openai"
+      tag: "v0.22.1"
+      modelURL: "Qwen/Qwen2.5-1.5B-Instruct"
+      replicaCount: 1
+      requestCPU: 2
+      requestMemory: "8Gi"
+      requestGPU: 1
+      vllmConfig:
+        maxModelLen: 4096
+        extraArgs:
+          - "--gpu-memory-utilization=0.90"
+          - "--max-num-seqs=32"
+
+    # Model 2: the Project 1 model — known-good flags on a 24GB L4.
+    - name: "qwen-7b-awq"
+      repository: "vllm/vllm-openai"
+      tag: "v0.22.1"
+      modelURL: "Qwen/Qwen2.5-7B-Instruct-AWQ"
+      replicaCount: 1
+      requestCPU: 2
+      requestMemory: "8Gi"
+      requestGPU: 1
+      vllmConfig:
+        maxModelLen: 8192
+        extraArgs:
+          - "--quantization=awq_marlin"
+          - "--dtype=float16"
+          - "--gpu-memory-utilization=0.90"
+          - "--max-num-seqs=16"
+
+routerSpec:
+  enableRouter: true
+  replicaCount: 1
+  # roundrobin makes request distribution VISIBLE for the demo; alternatives:
+  # session (sticky per session-id), prefixaware / kvaware (route to the backend
+  # most likely to hit the KV/prefix cache).
+  routingLogic: "roundrobin"
+  serviceType: ClusterIP
+  resources:
+    requests:
+      cpu: "400m"
+      memory: "1000Mi"
